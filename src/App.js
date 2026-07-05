@@ -26,10 +26,6 @@ export default function App() {
   const [cupon, setCupon] = useState(null);
   const [verificandoCupon, setVerificandoCupon] = useState(false);
   const [cuponError, setCuponError] = useState('');
-  const [comprobante, setComprobante] = useState(null);
-  const [comprobantePreview, setComprobantePreview] = useState(null);
-  const [subiendoComprobante, setSubiendoComprobante] = useState(false);
-  const [pedidoId, setPedidoId] = useState(null);
   const negocioId = getNegocioId();
 
   useEffect(() => {
@@ -79,42 +75,17 @@ export default function App() {
 
   const quitarCupon = () => { setCupon(null); setCuponCodigo(''); setCuponError(''); };
 
-  const seleccionarComprobante = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setComprobante(file);
-    setComprobantePreview(URL.createObjectURL(file));
-  };
-
   const subtotal = carrito.reduce((s,x) => s + x.cant*x.precio, 0);
-  const delivery = form.tipoEntrega === 'delivery' ? 15 : 0;
+  const delivery = form.tipoEntrega === 'delivery' ? (negocio?.costo_delivery ?? 15) : 0;
   const descuento = cupon ? (cupon.tipo==='porcentaje' ? Math.round(subtotal * cupon.descuento / 100) : cupon.descuento) : 0;
   const totalFinal = Math.max(0, subtotal + delivery - descuento);
   const cantTotal = carrito.reduce((s,x) => s + x.cant, 0);
-  const necesitaComprobante = form.metodoPago === 'qr' || form.metodoPago === 'transferencia';
 
   const confirmarPedido = async () => {
     if (!form.nombre || !form.telefono) { setError('Llena tu nombre y teléfono'); return; }
-    if (form.tipoEntrega === 'delivery' && !form.direccion) { setError('Ingresa tu dirección'); return; }
-    if (necesitaComprobante && !comprobante) { setError('Por favor sube el comprobante de pago'); return; }
+    if (form.tipoEntrega === 'delivery' && !form.direccion) { setError('Ingresa tu dirección o comparte tu ubicación'); return; }
     setEnviando(true); setError('');
-
-    let comprobante_url = null;
-
-    // Subir comprobante si existe
-    if (comprobante) {
-      setSubiendoComprobante(true);
-      const ext = comprobante.name.split('.').pop();
-      const nombre = `comprobante-${Date.now()}.${ext}`;
-      const { error: uploadError } = await supabase.storage.from('productos').upload(nombre, comprobante, { upsert: true });
-      if (!uploadError) {
-        const { data: urlData } = supabase.storage.from('productos').getPublicUrl(nombre);
-        comprobante_url = urlData.publicUrl;
-      }
-      setSubiendoComprobante(false);
-    }
-
-    const { data: pedidoData, error: err } = await supabase.from('pedidos').insert({
+    const { error: err } = await supabase.from('pedidos').insert({
       negocio_id: negocioId,
       cliente_nombre: form.nombre,
       cliente_telefono: form.telefono,
@@ -125,13 +96,10 @@ export default function App() {
       metodo_pago: form.metodoPago,
       cupon_codigo: cupon ? cupon.codigo : null,
       descuento: descuento,
-      comprobante_url,
-      nota: `${form.tipoEntrega==='recoger'?'🏪 RECOGER EN LOCAL':'🚚 DELIVERY'} | 💳 ${form.metodoPago.toUpperCase()}${comprobante_url?' | ✅ COMPROBANTE ADJUNTO':''}${form.nota?' | '+form.nota:''}`
-    }).select().single();
-
+      nota: `${form.tipoEntrega==='recoger'?'🏪 RECOGER EN LOCAL':'🚚 DELIVERY'} | 💳 ${form.metodoPago.toUpperCase()}${form.nota?' | '+form.nota:''}`
+    });
     if (err) { setError('Error al enviar. Intenta de nuevo.'); setEnviando(false); return; }
     if (cupon) await supabase.from('cupones').update({ usos_actuales: cupon.usos_actuales + 1 }).eq('id', cupon.id);
-    setPedidoId(pedidoData?.id);
     setEnviando(false);
     setPantalla('confirmado');
   };
@@ -171,18 +139,35 @@ export default function App() {
             {form.tipoEntrega==='delivery'?'🚚 Delivery':'🏪 Recoger'}
           </div>
           <div style={{ background:'#EFF6FF', borderRadius:12, padding:'10px', fontSize:13, fontWeight:600, color:'#2563EB' }}>
-            {form.metodoPago==='efectivo'?'💵 Efectivo':form.metodoPago==='qr'?'📱 QR pagado':'🏦 Transferencia'}
+            {form.metodoPago==='efectivo'?'💵 Efectivo':form.metodoPago==='qr'?'📱 QR':'🏦 Transferencia'}
           </div>
         </div>
-        {comprobantePreview && (
-          <div style={{ background:'#F0FDF4', borderRadius:12, padding:'10px', marginBottom:16, fontSize:13, color:'#059669', fontWeight:600 }}>
-            ✅ Comprobante de pago adjunto
+
+        {/* Mostrar QR si eligió pago QR */}
+        {form.metodoPago === 'qr' && negocio.qr_url && (
+          <div style={{ marginBottom:16 }}>
+            <div style={{ fontSize:14, fontWeight:600, color:'#1E293B', marginBottom:8 }}>Escanea para pagar:</div>
+            <img src={negocio.qr_url} alt="QR de pago" style={{ width:160, height:160, objectFit:'contain', borderRadius:12, border:'2px solid #E2E8F0', margin:'0 auto', display:'block' }} />
+            <div style={{ fontSize:12, color:'#94A3B8', marginTop:6 }}>Monto: <strong style={{ color:'#1E293B' }}>Bs. {totalFinal}</strong></div>
           </div>
         )}
+
+        {/* Mostrar datos transferencia */}
+        {form.metodoPago === 'transferencia' && negocio.info_transferencia && (
+          <div style={{ background:'#F0F9FF', borderRadius:12, padding:'12px', marginBottom:16, textAlign:'left' }}>
+            <div style={{ fontSize:13, fontWeight:600, color:'#0369A1', marginBottom:6 }}>🏦 Datos para transferir:</div>
+            <pre style={{ fontSize:13, color:'#1E293B', whiteSpace:'pre-wrap', fontFamily:'inherit', margin:0 }}>{negocio.info_transferencia}</pre>
+            <div style={{ fontSize:12, color:'#64748B', marginTop:6 }}>Monto: <strong style={{ color:'#1E293B' }}>Bs. {totalFinal}</strong></div>
+          </div>
+        )}
+
         <div style={{ background:'#F8FAFC', borderRadius:16, padding:'1rem', marginBottom:24, textAlign:'left' }}>
           {carrito.map((x,i) => (
-            <div key={i} style={{ display:'flex', justifyContent:'space-between', fontSize:14, marginBottom:6 }}>
-              <span>{x.cant}x {x.nombre}</span>
+            <div key={i} style={{ display:'flex', justifyContent:'space-between', fontSize:14, marginBottom:6, alignItems:'center' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                {x.foto_url && <img src={x.foto_url} alt={x.nombre} style={{ width:30, height:30, borderRadius:6, objectFit:'cover' }} />}
+                <span>{x.cant}x {x.nombre}</span>
+              </div>
               <span style={{ fontWeight:600 }}>Bs. {x.cant*x.precio}</span>
             </div>
           ))}
@@ -192,7 +177,7 @@ export default function App() {
             <span>Total</span><span style={{ color:'#10B981' }}>Bs. {totalFinal}</span>
           </div>
         </div>
-        <button onClick={()=>{ setCarrito([]); setCupon(null); setCuponCodigo(''); setComprobante(null); setComprobantePreview(null); setForm({nombre:'',telefono:'',direccion:'',nota:'',tipoEntrega:'delivery',metodoPago:'efectivo'}); setPantalla('catalogo'); }}
+        <button onClick={()=>{ setCarrito([]); setCupon(null); setCuponCodigo(''); setForm({nombre:'',telefono:'',direccion:'',nota:'',tipoEntrega:'delivery',metodoPago:'efectivo'}); setPantalla('catalogo'); }}
           style={{ width:'100%', padding:'15px', borderRadius:14, border:'none', background:'linear-gradient(135deg,#2563EB,#7C3AED)', color:'#fff', fontWeight:800, fontSize:16, cursor:'pointer' }}>
           Hacer otro pedido
         </button>
@@ -202,6 +187,7 @@ export default function App() {
 
   return (
     <div style={{ maxWidth:480, margin:'0 auto', minHeight:'100vh', background:'#F8FAFC', paddingBottom:80 }}>
+      {/* Header */}
       <div style={{ background:'linear-gradient(135deg,#1E293B,#2563EB)', padding:'1.5rem 1rem 3rem' }}>
         <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between' }}>
           <div>
@@ -229,6 +215,7 @@ export default function App() {
         )}
       </div>
 
+      {/* Modal detalle */}
       {productoDetalle && (
         <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.65)', zIndex:200, display:'flex', alignItems:'flex-end', justifyContent:'center' }}
           onClick={e=>{ if(e.target===e.currentTarget) setProductoDetalle(null); }}>
@@ -251,6 +238,7 @@ export default function App() {
         </div>
       )}
 
+      {/* CATÁLOGO */}
       {pantalla==='catalogo' && (
         <div style={{ padding:'1rem', marginTop:'-1.5rem' }}>
           {productos.length === 0 ? (
@@ -306,6 +294,7 @@ export default function App() {
         </div>
       )}
 
+      {/* CARRITO */}
       {pantalla==='carrito' && (
         <div style={{ padding:'1rem', marginTop:'-1.5rem' }}>
           <div style={{ fontWeight:800, fontSize:20, marginBottom:'1rem' }}>Tu carrito 🛒</div>
@@ -328,6 +317,7 @@ export default function App() {
             ))}
           </div>
 
+          {/* Cupón */}
           <div style={{ background:'#fff', borderRadius:16, padding:'1rem', marginBottom:'1rem', boxShadow:'0 2px 10px rgba(0,0,0,0.05)' }}>
             <div style={{ fontWeight:700, fontSize:14, marginBottom:10 }}>🎟️ ¿Tienes un cupón?</div>
             {cupon ? (
@@ -352,10 +342,11 @@ export default function App() {
             {cuponError && <div style={{ fontSize:12, color:'#DC2626', marginTop:6, fontWeight:500 }}>⚠️ {cuponError}</div>}
           </div>
 
+          {/* Tipo entrega */}
           <div style={{ marginBottom:'1rem' }}>
             <div style={{ fontWeight:700, fontSize:15, marginBottom:10 }}>¿Cómo quieres recibirlo?</div>
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
-              {[{key:'delivery',icon:'🚚',label:'Delivery',sub:'+Bs. 15',color:'#2563EB',bg:'#EFF6FF'},{key:'recoger',icon:'🏪',label:'Recoger',sub:'Sin costo',color:'#10B981',bg:'#F0FDF4'}].map(op=>(
+              {[{key:'delivery',icon:'🚚',label:'Delivery',sub:`+Bs. ${negocio?.costo_delivery ?? 15}`,color:'#2563EB',bg:'#EFF6FF'},{key:'recoger',icon:'🏪',label:'Recoger',sub:'Sin costo',color:'#10B981',bg:'#F0FDF4'}].map(op=>(
                 <button key={op.key} onClick={()=>setForm(p=>({...p,tipoEntrega:op.key,direccion:op.key==='recoger'?'Recoge en local':'',gps:false}))}
                   style={{ padding:'16px 12px', borderRadius:16, border:`2px solid ${form.tipoEntrega===op.key?op.color:'#E2E8F0'}`, background:form.tipoEntrega===op.key?op.bg:'#fff', cursor:'pointer', textAlign:'center' }}>
                   <div style={{ fontSize:30, marginBottom:6 }}>{op.icon}</div>
@@ -366,6 +357,7 @@ export default function App() {
             </div>
           </div>
 
+          {/* Resumen */}
           <div style={{ background:'#fff', borderRadius:16, padding:'1rem', marginBottom:'1.25rem', boxShadow:'0 2px 10px rgba(0,0,0,0.05)' }}>
             <div style={{ display:'flex', justifyContent:'space-between', fontSize:14, marginBottom:6, color:'#64748B' }}><span>Subtotal</span><span>Bs. {subtotal}</span></div>
             {delivery>0 && <div style={{ display:'flex', justifyContent:'space-between', fontSize:14, marginBottom:6, color:'#64748B' }}><span>Delivery</span><span>Bs. {delivery}</span></div>}
@@ -382,6 +374,7 @@ export default function App() {
         </div>
       )}
 
+      {/* DATOS */}
       {pantalla==='datos' && (
         <div style={{ padding:'1rem', marginTop:'-1.5rem' }}>
           <div style={{ fontWeight:800, fontSize:20, marginBottom:4 }}>
@@ -411,11 +404,12 @@ export default function App() {
             </div>
           )}
 
+          {/* Método de pago */}
           <div style={{ marginBottom:'1.25rem' }}>
             <label style={{ fontSize:13, fontWeight:600, color:'#64748B', display:'block', marginBottom:10 }}>💳 Método de pago</label>
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8, marginBottom:12 }}>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
               {METODOS_PAGO.map(m=>(
-                <button key={m.key} onClick={()=>{ setForm(p=>({...p,metodoPago:m.key})); setComprobante(null); setComprobantePreview(null); }}
+                <button key={m.key} onClick={()=>setForm(p=>({...p,metodoPago:m.key}))}
                   style={{ padding:'12px 8px', borderRadius:14, border:`2px solid ${form.metodoPago===m.key?'#2563EB':'#E2E8F0'}`, background:form.metodoPago===m.key?'#EFF6FF':'#fff', cursor:'pointer', textAlign:'center' }}>
                   <div style={{ fontSize:24, marginBottom:4 }}>{m.icon}</div>
                   <div style={{ fontWeight:700, fontSize:12, color:form.metodoPago===m.key?'#2563EB':'#1E293B' }}>{m.label}</div>
@@ -424,54 +418,27 @@ export default function App() {
               ))}
             </div>
 
-            {/* QR del negocio */}
-            {form.metodoPago==='qr' && (
-              <div style={{ background:'#F0F9FF', borderRadius:14, padding:'1rem', marginBottom:12 }}>
-                {negocio.qr_url ? (
-                  <>
-                    <div style={{ fontSize:14, fontWeight:700, color:'#0369A1', marginBottom:10, textAlign:'center' }}>📱 Escanea y paga Bs. {totalFinal}</div>
-                    <img src={negocio.qr_url} alt="QR de pago" style={{ width:180, height:180, objectFit:'contain', borderRadius:12, border:'2px solid #BAE6FD', margin:'0 auto', display:'block' }} />
-                  </>
-                ) : (
-                  <div style={{ fontSize:13, color:'#92400E', background:'#FEF3C7', borderRadius:10, padding:'10px 12px' }}>
-                    ⚠️ El negocio aún no configuró su QR. Elige otro método.
-                  </div>
-                )}
+            {/* Preview QR si está disponible */}
+            {form.metodoPago==='qr' && negocio.qr_url && (
+              <div style={{ marginTop:12, background:'#F0F9FF', borderRadius:12, padding:'12px', textAlign:'center' }}>
+                <div style={{ fontSize:13, fontWeight:600, color:'#0369A1', marginBottom:8 }}>Al confirmar verás el QR para pagar</div>
+                <img src={negocio.qr_url} alt="QR" style={{ width:80, height:80, objectFit:'contain', borderRadius:8, opacity:0.6 }} />
               </div>
             )}
-
-            {/* Datos transferencia */}
+            {form.metodoPago==='qr' && !negocio.qr_url && (
+              <div style={{ marginTop:8, background:'#FEF3C7', borderRadius:10, padding:'10px 12px', fontSize:13, color:'#92400E' }}>
+                ⚠️ El negocio aún no ha configurado su QR. Elige otro método de pago.
+              </div>
+            )}
             {form.metodoPago==='transferencia' && negocio.info_transferencia && (
-              <div style={{ background:'#F0F9FF', borderRadius:14, padding:'1rem', marginBottom:12 }}>
-                <div style={{ fontSize:13, fontWeight:700, color:'#0369A1', marginBottom:6 }}>🏦 Transfiere a:</div>
-                <pre style={{ fontSize:14, color:'#1E293B', whiteSpace:'pre-wrap', fontFamily:'inherit', margin:0, lineHeight:1.6 }}>{negocio.info_transferencia}</pre>
-                <div style={{ fontSize:13, color:'#0369A1', fontWeight:600, marginTop:8 }}>Monto: Bs. {totalFinal}</div>
+              <div style={{ marginTop:12, background:'#F0F9FF', borderRadius:12, padding:'12px' }}>
+                <div style={{ fontSize:13, fontWeight:600, color:'#0369A1', marginBottom:6 }}>🏦 Datos de transferencia:</div>
+                <pre style={{ fontSize:13, color:'#1E293B', whiteSpace:'pre-wrap', fontFamily:'inherit', margin:0 }}>{negocio.info_transferencia}</pre>
               </div>
             )}
-
-            {/* Subir comprobante */}
-            {necesitaComprobante && (
-              <div style={{ background:'#fff', borderRadius:14, padding:'1rem', border:'2px dashed #2563EB' }}>
-                <div style={{ fontSize:14, fontWeight:700, color:'#1E293B', marginBottom:6 }}>
-                  📎 Sube tu comprobante de pago <span style={{ color:'#EF4444' }}>*</span>
-                </div>
-                <div style={{ fontSize:13, color:'#64748B', marginBottom:12 }}>
-                  Toma una foto o captura de pantalla de tu pago y súbela aquí.
-                </div>
-                {comprobantePreview ? (
-                  <div style={{ textAlign:'center' }}>
-                    <img src={comprobantePreview} alt="comprobante" style={{ maxWidth:'100%', maxHeight:200, borderRadius:10, objectFit:'contain', marginBottom:10 }} />
-                    <button onClick={()=>{ setComprobante(null); setComprobantePreview(null); }}
-                      style={{ display:'block', margin:'0 auto', padding:'6px 16px', borderRadius:8, border:'1px solid #FCA5A5', background:'#FEF2F2', color:'#DC2626', cursor:'pointer', fontSize:12, fontWeight:600 }}>
-                      ✕ Quitar y subir otro
-                    </button>
-                  </div>
-                ) : (
-                  <label style={{ display:'block', padding:'14px', borderRadius:12, background:'#EFF6FF', textAlign:'center', cursor:'pointer', fontSize:14, fontWeight:600, color:'#2563EB' }}>
-                    📷 Toca para subir comprobante
-                    <input type="file" accept="image/*" onChange={seleccionarComprobante} style={{ display:'none' }} />
-                  </label>
-                )}
+            {form.metodoPago==='transferencia' && !negocio.info_transferencia && (
+              <div style={{ marginTop:8, background:'#FEF3C7', borderRadius:10, padding:'10px 12px', fontSize:13, color:'#92400E' }}>
+                ⚠️ El negocio aún no ha configurado datos de transferencia.
               </div>
             )}
           </div>
@@ -487,9 +454,13 @@ export default function App() {
 
           <button onClick={confirmarPedido} disabled={enviando}
             style={{ width:'100%', padding:'17px', borderRadius:16, border:'none', background:enviando?'#93C5FD':'linear-gradient(135deg,#2563EB,#7C3AED)', color:'#fff', fontWeight:800, fontSize:16, cursor:enviando?'not-allowed':'pointer', boxShadow:enviando?'none':'0 8px 24px rgba(37,99,235,0.35)' }}>
-            {enviando ? (subiendoComprobante ? '📤 Subiendo comprobante...' : '⏳ Enviando pedido...') : `✅ Confirmar pedido · Bs. ${totalFinal}`}
+            {enviando?'⏳ Enviando...': `✅ Confirmar pedido · Bs. ${totalFinal}`}
           </button>
           <div style={{ textAlign:'center', fontSize:12, color:'#94A3B8', marginTop:'1rem' }}>🔒 Tu pedido es seguro</div>
+          <div style={{ textAlign:'center', fontSize:11, color:'#94A3B8', marginTop:'1.5rem', paddingBottom:'0.5rem' }}>
+            Creado por <strong>ALVARO R. MERLOS VALLEJOS</strong><br/>
+            by AX/CAPITALBOLIVIA
+          </div>
         </div>
       )}
     </div>
