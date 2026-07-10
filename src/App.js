@@ -11,6 +11,14 @@ const METODOS_PAGO = [
   { key:'transferencia', icon:'🏦', label:'Transferencia', sub:'Transferencia bancaria' },
 ];
 
+const estadoInfo = {
+  nuevo:       { icon:'🕐', label:'En revisión',      color:'#F59E0B', bg:'#FEF3C7', desc:'El negocio está revisando tu pedido...' },
+  preparacion: { icon:'👨‍🍳', label:'Aceptado ✅',     color:'#3B82F6', bg:'#DBEAFE', desc:'¡Tu pedido fue aceptado! Está siendo preparado.' },
+  listo:       { icon:'🚚', label:'Listo para entregar', color:'#10B981', bg:'#D1FAE5', desc:'Tu pedido está listo y en camino.' },
+  entregado:   { icon:'✅', label:'Entregado',         color:'#6B7280', bg:'#F3F4F6', desc:'¡Tu pedido fue entregado! Gracias.' },
+  rechazado:   { icon:'❌', label:'Rechazado',         color:'#EF4444', bg:'#FEE2E2', desc:'Lo sentimos, tu pedido fue rechazado.' },
+};
+
 export default function App() {
   const [negocio, setNegocio] = useState(null);
   const [productos, setProductos] = useState([]);
@@ -26,6 +34,11 @@ export default function App() {
   const [cupon, setCupon] = useState(null);
   const [verificandoCupon, setVerificandoCupon] = useState(false);
   const [cuponError, setCuponError] = useState('');
+  const [comprobante, setComprobante] = useState(null);
+  const [comprobantePreview, setComprobantePreview] = useState(null);
+  const [subiendoComprobante, setSubiendoComprobante] = useState(false);
+  const [pedidoConfirmado, setPedidoConfirmado] = useState(null);
+  const [estadoPedido, setEstadoPedido] = useState(null);
   const negocioId = getNegocioId();
 
   useEffect(() => {
@@ -37,6 +50,15 @@ export default function App() {
     };
     cargar();
   }, [negocioId]);
+
+  useEffect(() => {
+    if (!pedidoConfirmado) return;
+    const intervalo = setInterval(async () => {
+      const { data } = await supabase.from('pedidos').select('estado, motivo_rechazo, codigo_seguimiento').eq('id', pedidoConfirmado).single();
+      if (data) setEstadoPedido(data);
+    }, 5000);
+    return () => clearInterval(intervalo);
+  }, [pedidoConfirmado]);
 
   const agregarAlCarrito = (prod) => {
     setCarrito(prev => {
@@ -75,17 +97,41 @@ export default function App() {
 
   const quitarCupon = () => { setCupon(null); setCuponCodigo(''); setCuponError(''); };
 
+  const seleccionarComprobante = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setComprobante(file);
+    setComprobantePreview(URL.createObjectURL(file));
+  };
+
+  const costoDelivery = negocio?.costo_delivery ?? 15;
   const subtotal = carrito.reduce((s,x) => s + x.cant*x.precio, 0);
-  const delivery = form.tipoEntrega === 'delivery' ? (negocio?.costo_delivery ?? 15) : 0;
+  const delivery = form.tipoEntrega === 'delivery' ? costoDelivery : 0;
   const descuento = cupon ? (cupon.tipo==='porcentaje' ? Math.round(subtotal * cupon.descuento / 100) : cupon.descuento) : 0;
   const totalFinal = Math.max(0, subtotal + delivery - descuento);
   const cantTotal = carrito.reduce((s,x) => s + x.cant, 0);
+  const necesitaComprobante = form.metodoPago === 'qr' || form.metodoPago === 'transferencia';
 
   const confirmarPedido = async () => {
     if (!form.nombre || !form.telefono) { setError('Llena tu nombre y teléfono'); return; }
-    if (form.tipoEntrega === 'delivery' && !form.direccion) { setError('Ingresa tu dirección o comparte tu ubicación'); return; }
+    if (form.tipoEntrega === 'delivery' && !form.direccion) { setError('Ingresa tu dirección'); return; }
+    if (necesitaComprobante && !comprobante) { setError('Por favor sube el comprobante de pago'); return; }
     setEnviando(true); setError('');
-    const { error: err } = await supabase.from('pedidos').insert({
+
+    let comprobante_url = null;
+    if (comprobante) {
+      setSubiendoComprobante(true);
+      const ext = comprobante.name.split('.').pop();
+      const nombre = `comprobante-${Date.now()}.${ext}`;
+      const { error: uploadError } = await supabase.storage.from('productos').upload(nombre, comprobante, { upsert: true });
+      if (!uploadError) {
+        const { data: urlData } = supabase.storage.from('productos').getPublicUrl(nombre);
+        comprobante_url = urlData.publicUrl;
+      }
+      setSubiendoComprobante(false);
+    }
+
+    const { data: pedidoData, error: err } = await supabase.from('pedidos').insert({
       negocio_id: negocioId,
       cliente_nombre: form.nombre,
       cliente_telefono: form.telefono,
@@ -96,12 +142,17 @@ export default function App() {
       metodo_pago: form.metodoPago,
       cupon_codigo: cupon ? cupon.codigo : null,
       descuento: descuento,
-      nota: `${form.tipoEntrega==='recoger'?'🏪 RECOGER EN LOCAL':'🚚 DELIVERY'} | 💳 ${form.metodoPago.toUpperCase()}${form.nota?' | '+form.nota:''}`
-    });
+      comprobante_url,
+      nota: `${form.tipoEntrega==='recoger'?'🏪 RECOGER EN LOCAL':'🚚 DELIVERY'} | 💳 ${form.metodoPago.toUpperCase()}${comprobante_url?' | ✅ COMPROBANTE':''}${form.nota?' | '+form.nota:''}`
+    }).select().single();
+
     if (err) { setError('Error al enviar. Intenta de nuevo.'); setEnviando(false); return; }
     if (cupon) await supabase.from('cupones').update({ usos_actuales: cupon.usos_actuales + 1 }).eq('id', cupon.id);
+    
+    setPedidoConfirmado(pedidoData.id);
+    setEstadoPedido({ estado: 'nuevo', motivo_rechazo: null });
     setEnviando(false);
-    setPantalla('confirmado');
+    setPantalla('seguimiento');
   };
 
   if (!negocioId) return (
@@ -109,6 +160,7 @@ export default function App() {
       <div style={{ fontSize:72 }}>🛍</div>
       <div style={{ fontSize:26, fontWeight:800, color:'#fff' }}>PedidosFácil</div>
       <div style={{ fontSize:15, color:'rgba(255,255,255,0.7)', textAlign:'center', maxWidth:300 }}>Accede al link que te compartió el negocio.</div>
+      <div style={{ fontSize:11, color:'rgba(255,255,255,0.4)', marginTop:8 }}>Creado por ALVARO R. MERLOS VALLEJOS · AX/CAPITALBOLIVIA</div>
     </div>
   );
 
@@ -126,68 +178,75 @@ export default function App() {
     </div>
   );
 
-  if (pantalla === 'confirmado') return (
-    <div style={{ minHeight:'100vh', background:'linear-gradient(135deg,#059669,#10B981)', display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem' }}>
-      <div style={{ background:'#fff', borderRadius:28, padding:'2.5rem 2rem', textAlign:'center', maxWidth:380, width:'100%', boxShadow:'0 24px 60px rgba(0,0,0,0.2)' }}>
-        <div style={{ width:90, height:90, borderRadius:'50%', background:'linear-gradient(135deg,#10B981,#059669)', display:'flex', alignItems:'center', justifyContent:'center', margin:'0 auto 1.25rem', fontSize:44, boxShadow:'0 8px 24px rgba(16,185,129,0.4)' }}>✅</div>
-        <div style={{ fontSize:26, fontWeight:800, marginBottom:8 }}>¡Pedido enviado!</div>
-        <div style={{ fontSize:15, color:'#64748B', marginBottom:16 }}>
-          <strong>{negocio.nombre}</strong> recibió tu pedido y te contactará al <strong>{form.telefono}</strong>
-        </div>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:16 }}>
-          <div style={{ background:'#F0FDF4', borderRadius:12, padding:'10px', fontSize:13, fontWeight:600, color:'#059669' }}>
-            {form.tipoEntrega==='delivery'?'🚚 Delivery':'🏪 Recoger'}
-          </div>
-          <div style={{ background:'#EFF6FF', borderRadius:12, padding:'10px', fontSize:13, fontWeight:600, color:'#2563EB' }}>
-            {form.metodoPago==='efectivo'?'💵 Efectivo':form.metodoPago==='qr'?'📱 QR':'🏦 Transferencia'}
-          </div>
-        </div>
+  if (pantalla === 'seguimiento' && estadoPedido) {
+    const info = estadoInfo[estadoPedido.estado] || estadoInfo.nuevo;
+    return (
+      <div style={{ minHeight:'100vh', background:'linear-gradient(135deg,#1E293B,#2563EB)', display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem' }}>
+        <div style={{ background:'#fff', borderRadius:28, padding:'2.5rem 2rem', textAlign:'center', maxWidth:380, width:'100%', boxShadow:'0 24px 60px rgba(0,0,0,0.2)' }}>
+          <div style={{ fontSize:64, marginBottom:16 }}>{info.icon}</div>
+          <div style={{ fontSize:22, fontWeight:800, marginBottom:8 }}>{info.label}</div>
+          <div style={{ fontSize:15, color:'#64748B', marginBottom:20 }}>{info.desc}</div>
 
-        {/* Mostrar QR si eligió pago QR */}
-        {form.metodoPago === 'qr' && negocio.qr_url && (
-          <div style={{ marginBottom:16 }}>
-            <div style={{ fontSize:14, fontWeight:600, color:'#1E293B', marginBottom:8 }}>Escanea para pagar:</div>
-            <img src={negocio.qr_url} alt="QR de pago" style={{ width:160, height:160, objectFit:'contain', borderRadius:12, border:'2px solid #E2E8F0', margin:'0 auto', display:'block' }} />
-            <div style={{ fontSize:12, color:'#94A3B8', marginTop:6 }}>Monto: <strong style={{ color:'#1E293B' }}>Bs. {totalFinal}</strong></div>
-          </div>
-        )}
-
-        {/* Mostrar datos transferencia */}
-        {form.metodoPago === 'transferencia' && negocio.info_transferencia && (
-          <div style={{ background:'#F0F9FF', borderRadius:12, padding:'12px', marginBottom:16, textAlign:'left' }}>
-            <div style={{ fontSize:13, fontWeight:600, color:'#0369A1', marginBottom:6 }}>🏦 Datos para transferir:</div>
-            <pre style={{ fontSize:13, color:'#1E293B', whiteSpace:'pre-wrap', fontFamily:'inherit', margin:0 }}>{negocio.info_transferencia}</pre>
-            <div style={{ fontSize:12, color:'#64748B', marginTop:6 }}>Monto: <strong style={{ color:'#1E293B' }}>Bs. {totalFinal}</strong></div>
-          </div>
-        )}
-
-        <div style={{ background:'#F8FAFC', borderRadius:16, padding:'1rem', marginBottom:24, textAlign:'left' }}>
-          {carrito.map((x,i) => (
-            <div key={i} style={{ display:'flex', justifyContent:'space-between', fontSize:14, marginBottom:6, alignItems:'center' }}>
-              <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                {x.foto_url && <img src={x.foto_url} alt={x.nombre} style={{ width:30, height:30, borderRadius:6, objectFit:'cover' }} />}
-                <span>{x.cant}x {x.nombre}</span>
-              </div>
-              <span style={{ fontWeight:600 }}>Bs. {x.cant*x.precio}</span>
+          {estadoPedido.estado === 'rechazado' && estadoPedido.motivo_rechazo && (
+            <div style={{ background:'#FEE2E2', borderRadius:12, padding:'12px', marginBottom:16, fontSize:14, color:'#DC2626' }}>
+              Motivo: {estadoPedido.motivo_rechazo}
             </div>
-          ))}
-          {delivery > 0 && <div style={{ display:'flex', justifyContent:'space-between', fontSize:13, color:'#94A3B8', marginTop:4 }}><span>Delivery</span><span>Bs. {delivery}</span></div>}
-          {descuento > 0 && <div style={{ display:'flex', justifyContent:'space-between', fontSize:13, color:'#10B981', marginTop:4 }}><span>🎟 Descuento</span><span>-Bs. {descuento}</span></div>}
-          <div style={{ borderTop:'2px solid #E2E8F0', marginTop:10, paddingTop:10, display:'flex', justifyContent:'space-between', fontWeight:800, fontSize:18 }}>
-            <span>Total</span><span style={{ color:'#10B981' }}>Bs. {totalFinal}</span>
+          )}
+
+          <div style={{ background:info.bg, borderRadius:16, padding:'1rem', marginBottom:20 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+              <span style={{ fontSize:13, color:'#64748B' }}>Negocio</span>
+              <span style={{ fontSize:13, fontWeight:600 }}>{negocio.nombre}</span>
+            </div>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+              <span style={{ fontSize:13, color:'#64748B' }}>Cliente</span>
+              <span style={{ fontSize:13, fontWeight:600 }}>{form.nombre}</span>
+            </div>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+              <span style={{ fontSize:13, color:'#64748B' }}>Total</span>
+              <span style={{ fontSize:15, fontWeight:800, color:info.color }}>Bs. {totalFinal}</span>
+            </div>
+          </div>
+
+          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:20 }}>
+            {['nuevo','preparacion','listo','entregado'].map((paso, i) => {
+              const inf = estadoInfo[paso];
+              const pasos = ['nuevo','preparacion','listo','entregado'];
+              const activo = estadoPedido.estado !== 'rechazado' && pasos.indexOf(estadoPedido.estado) >= i;
+              return (
+                <div key={paso} style={{ textAlign:'center', flex:1 }}>
+                  <div style={{ width:32, height:32, borderRadius:'50%', background:activo?inf.color:'#E2E8F0', margin:'0 auto 4px', display:'flex', alignItems:'center', justifyContent:'center', fontSize:14 }}>
+                    {activo ? '✓' : i+1}
+                  </div>
+                  <div style={{ fontSize:9, color:activo?inf.color:'#94A3B8', fontWeight:activo?600:400, lineHeight:1.2 }}>{inf.label.split(' ')[0]}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          {estadoPedido.estado === 'nuevo' && (
+            <div style={{ fontSize:12, color:'#94A3B8', marginBottom:16 }}>
+              🔄 Actualizando automáticamente cada 5 segundos...
+            </div>
+          )}
+
+          {(estadoPedido.estado === 'entregado' || estadoPedido.estado === 'rechazado') && (
+            <button onClick={()=>{ setCarrito([]); setCupon(null); setCuponCodigo(''); setComprobante(null); setComprobantePreview(null); setPedidoConfirmado(null); setEstadoPedido(null); setForm({nombre:'',telefono:'',direccion:'',nota:'',tipoEntrega:'delivery',metodoPago:'efectivo'}); setPantalla('catalogo'); }}
+              style={{ width:'100%', padding:'14px', borderRadius:14, border:'none', background:'linear-gradient(135deg,#2563EB,#7C3AED)', color:'#fff', fontWeight:800, fontSize:15, cursor:'pointer' }}>
+              Hacer otro pedido
+            </button>
+          )}
+
+          <div style={{ fontSize:11, color:'#94A3B8', marginTop:16 }}>
+            Creado por ALVARO R. MERLOS VALLEJOS · AX/CAPITALBOLIVIA
           </div>
         </div>
-        <button onClick={()=>{ setCarrito([]); setCupon(null); setCuponCodigo(''); setForm({nombre:'',telefono:'',direccion:'',nota:'',tipoEntrega:'delivery',metodoPago:'efectivo'}); setPantalla('catalogo'); }}
-          style={{ width:'100%', padding:'15px', borderRadius:14, border:'none', background:'linear-gradient(135deg,#2563EB,#7C3AED)', color:'#fff', fontWeight:800, fontSize:16, cursor:'pointer' }}>
-          Hacer otro pedido
-        </button>
       </div>
-    </div>
-  );
+    );
+  }
 
   return (
     <div style={{ maxWidth:480, margin:'0 auto', minHeight:'100vh', background:'#F8FAFC', paddingBottom:80 }}>
-      {/* Header */}
       <div style={{ background:'linear-gradient(135deg,#1E293B,#2563EB)', padding:'1.5rem 1rem 3rem' }}>
         <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between' }}>
           <div>
@@ -215,7 +274,6 @@ export default function App() {
         )}
       </div>
 
-      {/* Modal detalle */}
       {productoDetalle && (
         <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.65)', zIndex:200, display:'flex', alignItems:'flex-end', justifyContent:'center' }}
           onClick={e=>{ if(e.target===e.currentTarget) setProductoDetalle(null); }}>
@@ -238,7 +296,6 @@ export default function App() {
         </div>
       )}
 
-      {/* CATÁLOGO */}
       {pantalla==='catalogo' && (
         <div style={{ padding:'1rem', marginTop:'-1.5rem' }}>
           {productos.length === 0 ? (
@@ -291,10 +348,12 @@ export default function App() {
               </button>
             </div>
           )}
+          <div style={{ textAlign:'center', fontSize:11, color:'#94A3B8', marginTop:'2rem' }}>
+            Creado por ALVARO R. MERLOS VALLEJOS · AX/CAPITALBOLIVIA
+          </div>
         </div>
       )}
 
-      {/* CARRITO */}
       {pantalla==='carrito' && (
         <div style={{ padding:'1rem', marginTop:'-1.5rem' }}>
           <div style={{ fontWeight:800, fontSize:20, marginBottom:'1rem' }}>Tu carrito 🛒</div>
@@ -317,7 +376,6 @@ export default function App() {
             ))}
           </div>
 
-          {/* Cupón */}
           <div style={{ background:'#fff', borderRadius:16, padding:'1rem', marginBottom:'1rem', boxShadow:'0 2px 10px rgba(0,0,0,0.05)' }}>
             <div style={{ fontWeight:700, fontSize:14, marginBottom:10 }}>🎟️ ¿Tienes un cupón?</div>
             {cupon ? (
@@ -342,11 +400,10 @@ export default function App() {
             {cuponError && <div style={{ fontSize:12, color:'#DC2626', marginTop:6, fontWeight:500 }}>⚠️ {cuponError}</div>}
           </div>
 
-          {/* Tipo entrega */}
           <div style={{ marginBottom:'1rem' }}>
             <div style={{ fontWeight:700, fontSize:15, marginBottom:10 }}>¿Cómo quieres recibirlo?</div>
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
-              {[{key:'delivery',icon:'🚚',label:'Delivery',sub:`+Bs. ${negocio?.costo_delivery ?? 15}`,color:'#2563EB',bg:'#EFF6FF'},{key:'recoger',icon:'🏪',label:'Recoger',sub:'Sin costo',color:'#10B981',bg:'#F0FDF4'}].map(op=>(
+              {[{key:'delivery',icon:'🚚',label:'Delivery',sub:`+Bs. ${costoDelivery}`,color:'#2563EB',bg:'#EFF6FF'},{key:'recoger',icon:'🏪',label:'Recoger',sub:'Sin costo',color:'#10B981',bg:'#F0FDF4'}].map(op=>(
                 <button key={op.key} onClick={()=>setForm(p=>({...p,tipoEntrega:op.key,direccion:op.key==='recoger'?'Recoge en local':'',gps:false}))}
                   style={{ padding:'16px 12px', borderRadius:16, border:`2px solid ${form.tipoEntrega===op.key?op.color:'#E2E8F0'}`, background:form.tipoEntrega===op.key?op.bg:'#fff', cursor:'pointer', textAlign:'center' }}>
                   <div style={{ fontSize:30, marginBottom:6 }}>{op.icon}</div>
@@ -357,7 +414,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Resumen */}
           <div style={{ background:'#fff', borderRadius:16, padding:'1rem', marginBottom:'1.25rem', boxShadow:'0 2px 10px rgba(0,0,0,0.05)' }}>
             <div style={{ display:'flex', justifyContent:'space-between', fontSize:14, marginBottom:6, color:'#64748B' }}><span>Subtotal</span><span>Bs. {subtotal}</span></div>
             {delivery>0 && <div style={{ display:'flex', justifyContent:'space-between', fontSize:14, marginBottom:6, color:'#64748B' }}><span>Delivery</span><span>Bs. {delivery}</span></div>}
@@ -374,7 +430,6 @@ export default function App() {
         </div>
       )}
 
-      {/* DATOS */}
       {pantalla==='datos' && (
         <div style={{ padding:'1rem', marginTop:'-1.5rem' }}>
           <div style={{ fontWeight:800, fontSize:20, marginBottom:4 }}>
@@ -404,12 +459,11 @@ export default function App() {
             </div>
           )}
 
-          {/* Método de pago */}
           <div style={{ marginBottom:'1.25rem' }}>
             <label style={{ fontSize:13, fontWeight:600, color:'#64748B', display:'block', marginBottom:10 }}>💳 Método de pago</label>
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8, marginBottom:12 }}>
               {METODOS_PAGO.map(m=>(
-                <button key={m.key} onClick={()=>setForm(p=>({...p,metodoPago:m.key}))}
+                <button key={m.key} onClick={()=>{ setForm(p=>({...p,metodoPago:m.key})); setComprobante(null); setComprobantePreview(null); }}
                   style={{ padding:'12px 8px', borderRadius:14, border:`2px solid ${form.metodoPago===m.key?'#2563EB':'#E2E8F0'}`, background:form.metodoPago===m.key?'#EFF6FF':'#fff', cursor:'pointer', textAlign:'center' }}>
                   <div style={{ fontSize:24, marginBottom:4 }}>{m.icon}</div>
                   <div style={{ fontWeight:700, fontSize:12, color:form.metodoPago===m.key?'#2563EB':'#1E293B' }}>{m.label}</div>
@@ -418,27 +472,45 @@ export default function App() {
               ))}
             </div>
 
-            {/* Preview QR si está disponible */}
             {form.metodoPago==='qr' && negocio.qr_url && (
-              <div style={{ marginTop:12, background:'#F0F9FF', borderRadius:12, padding:'12px', textAlign:'center' }}>
-                <div style={{ fontSize:13, fontWeight:600, color:'#0369A1', marginBottom:8 }}>Al confirmar verás el QR para pagar</div>
-                <img src={negocio.qr_url} alt="QR" style={{ width:80, height:80, objectFit:'contain', borderRadius:8, opacity:0.6 }} />
+              <div style={{ background:'#F0F9FF', borderRadius:14, padding:'1rem', marginBottom:12, textAlign:'center' }}>
+                <div style={{ fontSize:14, fontWeight:700, color:'#0369A1', marginBottom:10 }}>📱 Escanea y paga Bs. {totalFinal}</div>
+                <img src={negocio.qr_url} alt="QR de pago" style={{ width:180, height:180, objectFit:'contain', borderRadius:12, border:'2px solid #BAE6FD', margin:'0 auto', display:'block' }} />
               </div>
             )}
             {form.metodoPago==='qr' && !negocio.qr_url && (
-              <div style={{ marginTop:8, background:'#FEF3C7', borderRadius:10, padding:'10px 12px', fontSize:13, color:'#92400E' }}>
-                ⚠️ El negocio aún no ha configurado su QR. Elige otro método de pago.
+              <div style={{ background:'#FEF3C7', borderRadius:10, padding:'10px 12px', fontSize:13, color:'#92400E', marginBottom:12 }}>
+                ⚠️ El negocio aún no configuró su QR. Elige otro método.
               </div>
             )}
             {form.metodoPago==='transferencia' && negocio.info_transferencia && (
-              <div style={{ marginTop:12, background:'#F0F9FF', borderRadius:12, padding:'12px' }}>
-                <div style={{ fontSize:13, fontWeight:600, color:'#0369A1', marginBottom:6 }}>🏦 Datos de transferencia:</div>
-                <pre style={{ fontSize:13, color:'#1E293B', whiteSpace:'pre-wrap', fontFamily:'inherit', margin:0 }}>{negocio.info_transferencia}</pre>
+              <div style={{ background:'#F0F9FF', borderRadius:14, padding:'1rem', marginBottom:12 }}>
+                <div style={{ fontSize:13, fontWeight:700, color:'#0369A1', marginBottom:6 }}>🏦 Transfiere a:</div>
+                <pre style={{ fontSize:14, color:'#1E293B', whiteSpace:'pre-wrap', fontFamily:'inherit', margin:0, lineHeight:1.6 }}>{negocio.info_transferencia}</pre>
+                <div style={{ fontSize:13, color:'#0369A1', fontWeight:600, marginTop:8 }}>Monto: Bs. {totalFinal}</div>
               </div>
             )}
-            {form.metodoPago==='transferencia' && !negocio.info_transferencia && (
-              <div style={{ marginTop:8, background:'#FEF3C7', borderRadius:10, padding:'10px 12px', fontSize:13, color:'#92400E' }}>
-                ⚠️ El negocio aún no ha configurado datos de transferencia.
+
+            {necesitaComprobante && (
+              <div style={{ background:'#fff', borderRadius:14, padding:'1rem', border:'2px dashed #2563EB' }}>
+                <div style={{ fontSize:14, fontWeight:700, color:'#1E293B', marginBottom:6 }}>
+                  📎 Sube tu comprobante de pago <span style={{ color:'#EF4444' }}>*</span>
+                </div>
+                <div style={{ fontSize:13, color:'#64748B', marginBottom:12 }}>Toma una foto de tu comprobante y súbela aquí.</div>
+                {comprobantePreview ? (
+                  <div style={{ textAlign:'center' }}>
+                    <img src={comprobantePreview} alt="comprobante" style={{ maxWidth:'100%', maxHeight:200, borderRadius:10, objectFit:'contain', marginBottom:10 }} />
+                    <button onClick={()=>{ setComprobante(null); setComprobantePreview(null); }}
+                      style={{ display:'block', margin:'0 auto', padding:'6px 16px', borderRadius:8, border:'1px solid #FCA5A5', background:'#FEF2F2', color:'#DC2626', cursor:'pointer', fontSize:12, fontWeight:600 }}>
+                      ✕ Quitar y subir otro
+                    </button>
+                  </div>
+                ) : (
+                  <label style={{ display:'block', padding:'14px', borderRadius:12, background:'#EFF6FF', textAlign:'center', cursor:'pointer', fontSize:14, fontWeight:600, color:'#2563EB' }}>
+                    📷 Toca para subir comprobante
+                    <input type="file" accept="image/*" onChange={seleccionarComprobante} style={{ display:'none' }} />
+                  </label>
+                )}
               </div>
             )}
           </div>
@@ -454,12 +526,11 @@ export default function App() {
 
           <button onClick={confirmarPedido} disabled={enviando}
             style={{ width:'100%', padding:'17px', borderRadius:16, border:'none', background:enviando?'#93C5FD':'linear-gradient(135deg,#2563EB,#7C3AED)', color:'#fff', fontWeight:800, fontSize:16, cursor:enviando?'not-allowed':'pointer', boxShadow:enviando?'none':'0 8px 24px rgba(37,99,235,0.35)' }}>
-            {enviando?'⏳ Enviando...': `✅ Confirmar pedido · Bs. ${totalFinal}`}
+            {enviando ? (subiendoComprobante ? '📤 Subiendo comprobante...' : '⏳ Enviando pedido...') : `✅ Confirmar pedido · Bs. ${totalFinal}`}
           </button>
           <div style={{ textAlign:'center', fontSize:12, color:'#94A3B8', marginTop:'1rem' }}>🔒 Tu pedido es seguro</div>
-          <div style={{ textAlign:'center', fontSize:11, color:'#94A3B8', marginTop:'1.5rem', paddingBottom:'0.5rem' }}>
-            Creado por <strong>ALVARO R. MERLOS VALLEJOS</strong><br/>
-            by AX/CAPITALBOLIVIA
+          <div style={{ textAlign:'center', fontSize:11, color:'#94A3B8', marginTop:8 }}>
+            Creado por ALVARO R. MERLOS VALLEJOS · AX/CAPITALBOLIVIA
           </div>
         </div>
       )}
